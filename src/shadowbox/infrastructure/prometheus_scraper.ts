@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 import * as child_process from 'child_process';
 import * as fs from 'fs';
 import * as http from 'http';
@@ -23,62 +22,71 @@ import * as path from 'path';
 import * as logging from '../infrastructure/logging';
 
 export interface QueryResultData {
-  resultType: 'matrix'|'vector'|'scalar'|'string';
-  result: Array < {
+  resultType: 'matrix' | 'vector' | 'scalar' | 'string';
+  result: Array<{
     metric: {[labelValue: string]: string};
     value: [number, string];
-  }
-  > ;
+  }>;
 }
 
 // From https://prometheus.io/docs/prometheus/latest/querying/api/
 interface QueryResult {
-  status: 'success'|'error';
+  status: 'success' | 'error';
   data: QueryResultData;
   errorType: string;
   error: string;
 }
 
-export class PrometheusClient {
+export interface PrometheusClient {
+  query(query: string): Promise<QueryResultData>;
+}
+
+export class ApiPrometheusClient implements PrometheusClient {
   constructor(private address: string) {}
 
   query(query: string): Promise<QueryResultData> {
     return new Promise<QueryResultData>((fulfill, reject) => {
       const url = `${this.address}/api/v1/query?query=${encodeURIComponent(query)}`;
-      http.get(url, (response) => {
-            if (response.statusCode < 200 || response.statusCode > 299) {
-              reject(new Error(`Got error ${response.statusCode}`));
-              response.resume();
-              return;
+      http
+        .get(url, (response) => {
+          if (response.statusCode < 200 || response.statusCode > 299) {
+            reject(new Error(`Got error ${response.statusCode}`));
+            response.resume();
+            return;
+          }
+          let body = '';
+          response.on('data', (data) => {
+            body += data;
+          });
+          response.on('end', () => {
+            const result = JSON.parse(body) as QueryResult;
+            if (result.status !== 'success') {
+              return reject(new Error(`Error ${result.errorType}: ${result.error}`));
             }
-            let body = '';
-            response.on('data', (data) => {
-              body += data;
-            });
-            response.on('end', () => {
-              const result = JSON.parse(body) as QueryResult;
-              if (result.status !== 'success') {
-                return reject(new Error(`Error ${result.errorType}: ${result.error}`));
-              }
-              fulfill(result.data);
-            });
-          }).on('error', (e) => {
-        reject(new Error(`Failed to query prometheus API: ${e}`));
-      });
+            fulfill(result.data);
+          });
+        })
+        .on('error', (e) => {
+          reject(new Error(`Failed to query prometheus API: ${e}`));
+        });
     });
   }
 }
 
 export async function startPrometheus(
-    binaryFilename: string, configFilename: string, configJson: {}, processArgs: string[],
-    endpoint: string) {
+  binaryFilename: string,
+  configFilename: string,
+  configJson: {},
+  processArgs: string[],
+  endpoint: string
+) {
   await writePrometheusConfigToDisk(configFilename, configJson);
   await spawnPrometheusSubprocess(binaryFilename, processArgs, endpoint);
 }
 
 async function writePrometheusConfigToDisk(configFilename: string, configJson: {}) {
   await mkdirp.sync(path.dirname(configFilename));
-  const ymlTxt = jsyaml.safeDump(configJson, {'sortKeys': true});
+  const ymlTxt = jsyaml.safeDump(configJson, {sortKeys: true});
   // Write the file asynchronously to prevent blocking the node thread.
   await new Promise<void>((resolve, reject) => {
     fs.writeFile(configFilename, ymlTxt, 'utf-8', (err) => {
@@ -92,9 +100,12 @@ async function writePrometheusConfigToDisk(configFilename: string, configJson: {
 }
 
 async function spawnPrometheusSubprocess(
-    binaryFilename: string, processArgs: string[],
-    prometheusEndpoint: string): Promise<child_process.ChildProcess> {
-  logging.info(`Starting Prometheus with args [${processArgs}]`);
+  binaryFilename: string,
+  processArgs: string[],
+  prometheusEndpoint: string
+): Promise<child_process.ChildProcess> {
+  logging.info('======== Starting Prometheus ========');
+  logging.info(`${binaryFilename} ${processArgs.map((a) => `"${a}"`).join(' ')}`);
   const runProcess = child_process.spawn(binaryFilename, processArgs);
   runProcess.on('error', (error) => {
     logging.error(`Error spawning Prometheus: ${error}`);
@@ -119,12 +130,14 @@ async function waitForPrometheusReady(prometheusEndpoint: string) {
 }
 
 function isHttpEndpointHealthy(endpoint: string): Promise<boolean> {
-  return new Promise((resolve, reject) => {
-    http.get(endpoint, (response) => {
-          resolve(response.statusCode >= 200 && response.statusCode < 300);
-        }).on('error', (e) => {
-      // Prometheus is not ready yet.
-      resolve(false);
-    });
+  return new Promise((resolve, _) => {
+    http
+      .get(endpoint, (response) => {
+        resolve(response.statusCode >= 200 && response.statusCode < 300);
+      })
+      .on('error', () => {
+        // Prometheus is not ready yet.
+        resolve(false);
+      });
   });
 }
